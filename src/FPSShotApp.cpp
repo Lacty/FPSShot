@@ -15,32 +15,83 @@ using namespace ci;
 using namespace ci::app;
 using namespace std;
 
+
+class Transform {
+public:
+  Vec3f pos;
+  Vec3f scale;
+  Vec3f rotation;
+};
+
+class Triangle {
+public:
+  Vec3f v1, v2, v3;
+  Color color;
+  Transform transform;
+  
+  Triangle();
+  Triangle(const Vec3f& v1, const Vec3f& v2, const Vec3f& v3,
+           const Transform& transform) {
+    this->v1        = v1;
+    this->v2        = v2;
+    this->v3        = v3;
+    this->transform = transform;
+  }
+};
+
+class HitTriangle {
+public:
+  bool operator < (const HitTriangle& polygon) const {
+    return this->dist < polygon.dist;
+  }
+  
+  HitTriangle();
+  HitTriangle(Triangle& triangle, const float& dist,
+              const Vec3f& intersect, const bool& is_hit) {
+    this->triangle      = &triangle;
+    this->dist          = dist;
+    this->intersect     = intersect;
+    this->is_hit        = is_hit;
+    this->hit_bullet_id = 0;
+  }
+  Triangle* triangle;
+  float     dist;
+  Vec3f     intersect;
+  bool      is_hit;
+  int       hit_bullet_id;
+};
+
 class FPSShotApp : public AppNative {
 private:
   Font font;
+  
+  list<Triangle>    triangles;
+  list<HitTriangle> hit_polygon;
 
-  struct Face {
-    bool hit;
-    Vec3f v1, v2, v3;
-    Vec3f offset;
-    Color color;
-  };
-  Face face;
-
-  struct Gun {
+  int bullet_id;
+  struct Bullet {
+    int   id;
+    bool  is_hit;
     Vec3f pos;
     Vec3f last;
     Vec3f size;
     Vec3f direction;
-    Gun(const Vec3f& pos,
-        const Vec3f& size,
-        const Vec3f& direction) {
+    float speed;
+    Bullet(const int&   id,
+           const Vec3f& pos,
+           const Vec3f& size,
+           const Vec3f& direction,
+           const float& speed) {
+      this->id        = id;
+      this->is_hit    = false;
       this->pos       = pos;
+      this->last      = pos;
       this->size      = size;
       this->direction = direction;
+      this->speed     = speed;
     }
   };
-  std::list<Gun> guns;
+  std::list<Bullet> bullets;
   
   bool isCollision(const Vec3f& v1, const Vec3f& v2, const Vec3f& v3,
                    const Vec3f& r1, const Vec3f& r2, Vec3f& IntersectPos);
@@ -91,13 +142,19 @@ void FPSShotApp::setup() {
   camera.setWorldUp(Vec3f::yAxis());
 
   GameCamera::getInstance().create(camera);
-
-  face.v1 = Vec3f(0, 40, 0);
-  face.v2 = Vec3f(40, -20, 0);
-  face.v3 = Vec3f(-40, -20, 0);
-  face.offset = Vec3f(300, 0, 500);
-  face.color = Color(1, 1, 0);
-
+  
+  triangles.push_back({ Vec3f(0, 40, 0), Vec3f(40, -20, 0), Vec3f(-40, -20, 0),
+                      { Vec3f(300, 0, 400), Vec3f(1, 1, 1), Vec3f(0, 0, 0) } });
+  
+  triangles.push_back({ Vec3f(0, 40, 0), Vec3f(40, -20, 0), Vec3f(-40, -20, 0),
+                      { Vec3f(350, 0, 410), Vec3f(1, 1, 1), Vec3f(0, 0, 0) } });
+  
+  for(auto& polygon : triangles) {
+    hit_polygon.push_back({ polygon, 0.0f, Vec3f::zero(), false });
+  }
+  
+  bullet_id = 0;
+  
   gl::enableAlphaBlending();
   glBlendFunc(GL_SRC0_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
   gl::enable(GL_CULL_FACE);
@@ -108,7 +165,7 @@ void FPSShotApp::setup() {
 void FPSShotApp::prepareSettings(Settings* settings) {
   settings->disableFrameRate();
 }
-
+  
 void FPSShotApp::keyDown(KeyEvent event) {
   quit();
 }
@@ -116,31 +173,59 @@ void FPSShotApp::keyDown(KeyEvent event) {
 void FPSShotApp::update() {
   showCursor();
   // カーソルを非表示に設定
-  //hideCursor();
+  hideCursor();
 
   GameCamera::getInstance().update();
 
-  Vec3f PIP;
-  for (auto& it : guns) {
-    it.last = it.pos;
-    it.pos += it.direction * 150;
-    if (isCollision(face.v1 + face.offset, face.v2 + face.offset, face.v3 + face.offset, it.pos, it.last, PIP)) {
-      face.hit = face.hit ? false : true;
+  // 弾とpolygonの当たり判定
+  for (auto& bullet : bullets) {
+    bullet.last = bullet.pos;
+    bullet.pos += bullet.direction * bullet.speed;
+    for (auto& polygon : hit_polygon) {
+      if (isCollision(polygon.triangle->v1 + polygon.triangle->transform.pos,
+                      polygon.triangle->v2 + polygon.triangle->transform.pos,
+                      polygon.triangle->v3 + polygon.triangle->transform.pos,
+                      bullet.pos, bullet.last, polygon.intersect)) {
+        bullet.is_hit         = true;
+        polygon.hit_bullet_id = bullet.id;
+        polygon.dist          = Vec3f(polygon.intersect - bullet.last).length();
+      }
+    }
+  }
+
+  // dist順にそーと
+  hit_polygon.sort();
+  
+  // hitした弾を削除
+  auto bullet_itr = bullets.begin();
+  while(bullet_itr != bullets.end()) {
+    if (bullet_itr->is_hit) {
+      for (auto& polygon : hit_polygon) {
+        if (polygon.hit_bullet_id == bullet_itr->id) {
+          polygon.is_hit = true;
+          bullet_itr = bullets.erase(bullet_itr);
+        }
+      }
+    } else {
+      bullet_itr++;
     }
   }
   
-  if (face.hit) {
-    face.color = Color::white();
-  } else {
-    face.color = Color(1, 0, 0);
+  // hitしたポリゴンの色を変更
+  for (auto& polygon : hit_polygon) {
+    if (polygon.is_hit) {
+      polygon.triangle->color = Color::white();
+    } else {
+      polygon.triangle->color = Color(1, 0, 0);
+    }
   }
   
   // カーソルを移動
   Mouse::getInstance().warpMousePos(Monitor::getInstance().getCenter());
 
   if (!Mouse::getInstance().Left().isPush) return;
-  guns.emplace_back((Gun(GameCamera::getInstance().cam().getEyePoint(), Vec3f(10, 10, 10), GameCamera::getInstance().cam().getViewDirection().normalized())));
-  console() << GameCamera::getInstance().cam().getViewDirection().normalized() << endl;
+  bullet_id++;
+  bullets.emplace_back((Bullet(bullet_id, GameCamera::getInstance().cam().getEyePoint(), Vec3f(10, 10, 10), GameCamera::getInstance().cam().getViewDirection().normalized(), 300)));
 }
 
 void FPSShotApp::draw() {
@@ -153,15 +238,17 @@ void FPSShotApp::draw() {
   gl::drawStringCentered("FPSShot", Vec2f::zero(), Color(1, 0.6, 0), font);
   gl::popModelView();
 
-  gl::pushModelView();
-  gl::translate(face.offset);
-  gl::color(face.color);
-  gl::drawSolidTriangle(face.v1.xy(), face.v2.xy(), face.v3.xy());
-  gl::popModelView();
+  for (auto polygon : triangles) {
+    gl::pushModelView();
+    gl::translate(polygon.transform.pos);
+    gl::color(polygon.color);
+    gl::drawSolidTriangle(polygon.v1.xy(), polygon.v2.xy(), polygon.v3.xy());
+    gl::popModelView();
+  }
   
-  for (auto it : guns) {
+  for (auto bullet : bullets) {
     gl::color(Color::white());
-    gl::drawCube(it.pos, it.size);
+    gl::drawCube(bullet.pos, bullet.size);
   }
 
   gl::color(Color::white());
@@ -172,7 +259,7 @@ void FPSShotApp::draw() {
 
 
 bool FPSShotApp::isCollision(const Vec3f& v1, const Vec3f& v2, const Vec3f& v3,
-                                const Vec3f& r1, const Vec3f& r2, Vec3f& IntersectPos)
+                             const Vec3f& r1, const Vec3f& r2, Vec3f& IntersectPos)
 {
   Vec3f Normal, Center, Intersect;
   
